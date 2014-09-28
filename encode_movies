@@ -67,7 +67,7 @@ sub usage
 sub generateConfig
 {
 
-    say("Generating Configuration Files...");
+    say("Generating Configuration File [$configFile]...");
 
     if (-f $configFile)
     {
@@ -155,9 +155,14 @@ sub initialize
         &hError("Couldn't find config file $configFile");
     }
 
-    if (!-f $config->{'inputdir'})
+    if (!-d $config->{'inputdir'})
     {
         &hError("Could not find input dir [$config->{'inputdir'}]");
+    }
+
+    if (!-d $config->{'outputdir'})
+    {
+        mkdir $config->{'outputdir'} || &hError("Could not find output dir [$config->{'outputdir'}]");
     }
 
 }
