@@ -1,0 +1,390 @@
+#! /usr/bin/perl
+
+use strict;
+use warnings;
+use EncodeMovies::Standard;
+
+
+#! /usr/bin/perl
+#############################################################################################
+## Author: 	Benjamin Hudgens
+## Date:	May 8, 2012
+##
+## Description:
+##		Sample Script for our Smith Roberts Tools
+#############################################################################################
+
+# Common Methods
+
+# Make sure flock works on different OS' (mac/linux)
+use Fcntl qw(:flock);
+
+# Cleanly handle kill signal and shutdowns
+$SIG{'TERM'}	= \&shutdown;
+
+# Default file to save all our settings (generate below)
+my $configDir	= $ENV{'HOME'};
+my $configFile	= "$configDir/" . '.encode_movies.json';
+
+# Command line options
+my $opts		= {};  # Always your command line args
+my $config		= {};
+
+# Do not store other script settings in the script - save them to config
+
+sub main
+{
+
+  &initialize();
+
+  # TODO: Fix permissions on Output files
+
+  # Make sure only one is running
+  open(SELF, "< $0") || exit;
+  flock(SELF, LOCK_EX | LOCK_NB) || exit;
+
+
+  &doEncodings();
+  #&cleanOutputDir();
+
+}
+
+sub usage
+{
+  &say ("						                        	");
+  &say ("Encode Movies into Apple TV Format               ");
+  &say ("Copyright (C) 2014 BDHC, Inc	               		");
+  &say ("-------------------------------------------------");
+  &say ("					                           		");
+  &say ("Usage:					                      	");
+  &say ("$0 [-gh] [-c configFile] [-d level]         		");
+  &say ("						                            ");
+  &say (" -c Specify a Config File            	   		");
+  &say (" -d Set the debug level              	   		");
+  &say (" -g Generate Sample Confiruation File	   		");
+  &say (" -h This help message                	   		");
+  &say (" -t Test Run - Don't actually run commands  		");
+  &say (" -q Quiet Mode                       	   		");
+  &say (" -z Zero Out Source files (Careful!)    	   		");
+  &say ("						                           	");
+}
+
+sub generateConfig
+{
+
+  say("Generating Sample Configuration File [$configFile]...");
+
+  if (-f $configFile)
+  {
+    &sError("Config File Exists - Not overwriting: $configFile");
+    return(undef);
+  }
+
+  # Create a sample data structure here
+  # which will make configuring various scripts really easy later
+  my $config								= {};
+
+  $config->{'inputdir'} = "$ENV{'HOME'}/Downloads";
+  $config->{'outputdir'} = "$ENV{'HOME'}/Encoded";
+  $config->{'stopfile'} = '/tmp/stopencoding';
+  $config->{'handbrake_cli_path'} = '/Applications/HandbrakeCLI';
+  $config->{'modified_threshhold'} = 30;
+  $config->{'zero_out_threshhold'} = 86400;
+
+  $config->{'source_extensions'} = ["mp4","avi","mkv","m4v"];
+  $config->{'exclude_strings'} = ["sample","testvideo","home","camera"];
+
+  if (!-d $configDir)
+  {
+    `mkdir -p $configDir`;
+    if (!-d $configDir) { &hError("Failed to create dir: [$configDir]") };
+  }
+
+  &saveConfig($configFile,$config);
+
+}
+
+sub shutdown
+{
+  # We get called even if we are sent a kill()
+  # Make sure to clean up 'anything' we are doing
+  # We can get called at any time
+  # Keep track of open files and various other things so they can get cleaned up
+
+  exit(0);
+}
+
+sub initialize
+{
+  # Some standard opts
+  # -c config file (default: /etc/srr/<myname>)
+  # -d debug level
+  # -g generate a config file
+  # -h help summary
+  # -q Quiet Mode
+
+  $opts = &getCommandLineOptions('c:d:ghtq'); # colon means takes argument / just letter is Boolean
+
+  if (!$opts)   # We had an error
+  {
+    &usage();
+    exit(0);
+  }
+
+  if ($opts->{'h'})
+  {
+    &usage();
+    &shutdown();
+  }
+
+  if ($opts->{'d'})
+  {
+    &setDebugLevel($opts->{'d'});
+    &debug(1,"Debug Level Set: $opts->{'d'}");
+  }
+
+  if ($opts->{'c'})
+  {
+    $configFile	= $opts->{'c'};
+  }
+
+  if ($opts->{'g'})
+  {
+    &generateConfig();
+    &shutdown();
+  }
+
+  if ($opts->{'t'})
+  {
+    &doTestRun(1);
+  }
+
+  if (-f $configFile)
+  {
+    $config	= &readConfig($configFile);
+  }
+  else
+  {
+    &hError("Couldn't find config file $configFile");
+  }
+
+  if (!-d $config->{'inputdir'})
+  {
+    &hError("Could not find input dir [$config->{'inputdir'}]");
+  }
+
+  if (!-d $config->{'outputdir'})
+  {
+    mkdir $config->{'outputdir'} || &hError("Could not find output dir [$config->{'outputdir'}]");
+  }
+
+  if (!-f $config->{'handbrake_cli_path'})
+  {
+    &say("You must have Handbrake CLI:  ");
+    &say("    http://sourceforge.net/projects/handbrake/files/latest/download");
+
+    &hError("Can't find Handbrake CLI");
+  }
+
+}
+
+################################################################
+## Helper Methods
+################################################################
+
+sub isStopped
+{
+  if (-f $config->{'stopfile'})
+  {
+    &debug(12,"Stop File exists [$config->{'stopfile'}]... exiting");
+    return 1;
+  }
+
+  return undef;
+}
+
+sub doEncodings
+{
+
+  &say("Running Encoding Jobs");
+
+  &debug(11,"Changing to dir [$config->{'inputdir'}]");
+  chdir($config->{'inputdir'});
+
+  my @files = `find . -type f`;
+  my @foundMovies		= ();
+
+  foreach my $file (@files)
+  {
+
+    # Stop Processing movies if the stop file exists
+    if (&isStopped()) { &say("Shutdown Requested"); &shutdown(0) };
+
+    chomp($file);
+    &debug(12,"Working on source file [$file]");
+
+    # Don't encode files containing
+    my $skip = 0;
+    if ($config->{'exclude_strings'})
+    {
+      foreach my $string (@{$config->{'exclude_strings'}})
+      {
+        &debug(13,"Checking if [$string] exists in [$file]");
+        if ($file =~ /$string/i)
+        {
+          &debug(14,"  Found - String [$string] exists in [$file]");
+          $skip++;
+          last;
+        }
+      }
+    }
+    if ($skip) { next };
+
+    ## Split the file from the file extension
+    $file =~ /.*\/(.*)\.(.*)/;
+
+    my $fileName = $1;
+    my $extension = $2;
+
+    push(@foundMovies,$fileName);
+
+    ## Skip files that have been nulled out
+    my @thestats = stat($file);
+
+    ## Skip files that are empty
+    if ($thestats[7] == 0) { &debug(9,"Skipping because small [$file]"); next };
+
+    ## Skip any files with no extension
+    if ($extension && $extension eq "") { &debug(9,"Skipping because no extension [$file]"); next };
+
+    ## Only Encode the file extensions that are specified in config
+    $skip = 1;
+    if ($config->{'source_extensions'})
+    {
+      foreach my $tst_extension (@{$config->{'source_extensions'}})
+      {
+        if ($tst_extension && $extension && $extension =~ /$tst_extension/i)
+        {
+          $skip = 0;
+          last;
+        }
+      }
+    }
+    if ($skip) { next };
+
+    if (&isStillUpdating($file)) { next };
+
+    # If the file we are about to create already exists
+    # Go to the next file
+    if (-f "$config->{'outputdir'}/$fileName.mp4")
+    {
+      if ($opts->{'z'}) {
+        &doZeroOutOldFiles($file);
+      }
+      &debug(13, "Skipping already encoded: $file");
+      next;
+    }
+
+    ## If the file is already an MP4 we can assume
+    ## it is already in the appropriate format for iTunes
+    ## And skip the time required to MP4 encode
+    ## TODO: This should be configurable
+    if (lc($extension) eq "mp4")
+    {
+      &runCommand("cp '$file' '$config->{'outputdir'}'");
+      next;
+    }
+
+    # Remove any single quotes from the file name
+    $file =~ s/'/\\'/;
+    $fileName =~ s/'/\\'/;
+
+    my $fullPathToOutputFile = "$config->{'outputdir'}/$fileName.mp4";
+
+    my $cmd = undef;
+
+    $cmd .= "/Applications/HandbrakeCLI ";
+    $cmd .= "-i '$file' ";
+    $cmd .= "-o '$fullPathToOutputFile' ";
+    $cmd .= "-Z \"AppleTV 3\" ";
+
+    &runCommand($cmd);
+
+  }
+
+}
+
+sub isStillUpdating
+{
+  my $file = shift;
+  ## Check if file is still growing - This can happen if someone
+  ## is still copying the file from offline storage
+  my $currentTime = time();
+  my $modifiedTime = (stat($file))[9];
+
+  if ($currentTime - $modifiedTime < $config->{'modified_threshhold'})
+  {
+    &debug(12,"Skipping file because still being modified: $file");
+    return 1;
+  }
+}
+
+
+sub doZeroOutOldFiles
+{
+  my $file = shift;
+  ## Check if file is still growing - This can happen if someone
+  ## is still copying the file from offline storage
+  my $currentTime = time();
+  my $modifiedTime = (stat($file))[9];
+  ## TODO: This should be a setting
+  ## TODO: This shouldn't always happen
+  ## Empty out source files that are too old
+
+  if ($currentTime - $modifiedTime > $config->{'zero_out_threshhold'})
+  {
+    &debug(13,"Purging old file: $file");
+
+    unlink($file);
+    `touch '$file'`;
+  }
+}
+
+# sub cleanOutputDir
+# {
+#
+#     chdir($outputDir);
+#     opendir(my $dh,$outputDir);
+#
+#     foreach my $file (readdir($dh))
+#     {
+#         if (!-f $file) { next };
+#
+#         $file =~ /(.*)\.(.*)/;
+#
+#         my $fileName = $1;
+#         my $extension = $2;
+#
+#         my $chk = undef;
+#
+#         foreach my $movie (@foundMovies)
+#         {
+#             if ($movie eq $fileName)
+#             {
+#                 $chk = 1;
+#             }
+#         }
+#
+#         if (!$chk)
+#         {
+#             my $cmd = "rm '$outputDir/$fileName.mp4'";
+#             &debug(5,"CMD: $cmd");
+#             system($cmd);
+#         }
+#
+#     }
+#
+# }
+
+&main();
+exit(0);
