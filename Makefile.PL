@@ -5,5 +5,5 @@ WriteMakefile(
     'NAME' 	=> 'encode_movies',
     'AUTHOR' 	=> 'Benjamin Hudgens',
     'VERSION' 	=> '1.02',
-    'EXE_FILES'	=> ['encode_movies']
+    'EXE_FILES'	=> ['bin/encode_movies']
 );
